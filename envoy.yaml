@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-conf
+data:
+  envoy.yaml: |
+    admin:
+      access_log_path: /tmp/admin_access.log
+      address:
+        socket_address:
+          protocol: TCP
+          address: 127.0.0.1
+          port_value: 9901
+    static_resources:
+      listeners:
+      - name: listener_0
+        address:
+          socket_address: { address: 0.0.0.0, port_value: 10000 }
+        filter_chains:
+        - filters:
+          - name: envoy.filters.network.http_connection_manager
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+              stat_prefix: ingress_http
+              codec_type: AUTO
+              route_config:
+                name: local_route
+                virtual_hosts:
+                - name: local_service
+                  domains: ["*"]
+                  routes:
+                  - match: { prefix: "/" }
+                    route: { host_rewrite_literal: www.google.com, cluster: service_google }
+              http_filters:
+              - name: envoy.filters.http.router
+      clusters:
+      - name: service_google
+        connect_timeout: 0.25s
+        type: LOGICAL_DNS
+        # Comment out the following line to test on v6 networks
+        dns_lookup_family: V4_ONLY
+        lb_policy: ROUND_ROBIN
+        load_assignment:
+          cluster_name: service_google
+          endpoints:
+          - lb_endpoints:
+            - endpoint:
+                address:
+                  socket_address:
+                    address: www.google.com
+                    port_value: 443
+        transport_socket:
+          name: envoy.transport_sockets.tls
+          typed_config:
+            "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+            sni: www.google.com
+---
+apiVersion: apps/v1beta1
+kind: Deployment
+metadata:
+  name: envoy
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: envoy
+    spec:
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.14.4
+        ports:
+        - containerPort: 9901
+          name: config
+        - containerPort: 10000
+          name: test
+
+        volumeMounts:
+        - mountPath: /etc/envoy # mount envoy-conf volumn to /etc/envoy
+          readOnly: true
+          name: envoy-conf
+      volumes:
+      - name: envoy-conf
+        configMap:
+          name: envoy-conf # place ConfigMap `envoy-conf` on /etc/envoy
+          items:
+            - key: envoy.yaml
+              path: envoy.yaml
+      - name: log
+        emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy
+spec:
+  type: LoadBalancer
+  ports:
+  - port: 9901
+    targetPort: 9901
+    name: debug
+  - port: 10000
+    targetPort: 10000 
+    name: test
+  selector:
+    app: envoy
